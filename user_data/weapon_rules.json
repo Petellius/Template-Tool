@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "category": "Venator Turret",
+      "accuracy_by_category": {
+        "Fighter": 100.0,
+        "Bomber": 100.0,
+        "Transport": 65.0,
+        "Corvette": 60.0,
+        "Frigate": 60.0,
+        "Cruiser": 50.0,
+        "Capital": 45.0,
+        "Super": 45.0
+      },
+      "fire_min_recharge": 7.0,
+      "fire_max_recharge": 18.0,
+      "fire_pulse_count": 2,
+      "fire_pulse_delay": 1.0,
+      "sfx_event": "Generic_HvyTurbolaser",
+      "modifiers": {
+        "allow_opportunity_fire_when_targeting": "False",
+        "allow_opportunity_fire_when_idle": "True",
+        "fire_when_in_power_to_weapons_mode": "Yes",
+        "power_to_weapons_mode_weapon_delay_multiplier": "0.25"
+      },
+      "category_restrictions": []
+    }
+  ]
+}

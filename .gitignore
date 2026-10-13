@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Personal / machine-specific state (recreated on first run)
+user_data/recent_projects.json
+user_data/app_settings.json
+user_data/weapon_configs.json
+user_data/*.tmp
+
+# Backups
+*.bak
