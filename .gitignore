@@ -6,6 +6,8 @@ __pycache__/
 user_data/recent_projects.json
 user_data/app_settings.json
 user_data/weapon_configs.json
+user_data/unit_hardpoint_assignments.json
+user_data/unit_hardpoint_overrides.json
 user_data/*.tmp
 
 # Backups

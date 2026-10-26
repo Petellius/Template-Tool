@@ -46,6 +46,11 @@ class WeaponConfig:
     fire_pulse_count: int = 1
     fire_pulse_delay: float = 0.0
     fire_range: float = 0.0
+    # Hardpoint-schema geometry/turret fields; 0.0 means "not set" and is
+    # never exported (a unit-weapon slot has no equivalent tags at all).
+    fire_cone_width: float = 0.0
+    fire_cone_height: float = 0.0
+    turret_rotate_speed: float = 0.0
     accuracy_by_category: dict[str, float] = field(default_factory=dict)
     sfx_event: str = ""
     modifiers: dict[str, str] = field(default_factory=dict)
@@ -177,6 +182,12 @@ def seed_from_hardpoint(config: WeaponConfig, fields: dict[str, list[str]]) -> N
 
     if "fire_range" not in overridden:
         config.fire_range = to_float(first("Fire_Range_Distance"), config.fire_range)
+    if "fire_cone_width" not in overridden:
+        config.fire_cone_width = to_float(first("Fire_Cone_Width"), config.fire_cone_width)
+    if "fire_cone_height" not in overridden:
+        config.fire_cone_height = to_float(first("Fire_Cone_Height"), config.fire_cone_height)
+    if "turret_rotate_speed" not in overridden:
+        config.turret_rotate_speed = to_float(first("Turret_Rotate_Speed"), config.turret_rotate_speed)
     if not config.source_projectile_name and first("Projectile_Damage"):
         # No external projectile - this hardpoint fires with its own flat
         # damage value (seen on some ability-style/direct-hit hardpoints).

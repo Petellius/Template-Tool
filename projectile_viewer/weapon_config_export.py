@@ -115,6 +115,17 @@ def _build_hardpoint_lines(config: WeaponConfig, depth: int) -> list[str]:
         core.append(_comment(depth, "Weapon Range"))
         core.append(_field(depth, "Fire_Range_Distance", config.fire_range))
 
+    if config.fire_cone_width or config.fire_cone_height:
+        core.append(_comment(depth, "Fire Cone"))
+        if config.fire_cone_width:
+            core.append(_field(depth, "Fire_Cone_Width", config.fire_cone_width))
+        if config.fire_cone_height:
+            core.append(_field(depth, "Fire_Cone_Height", config.fire_cone_height))
+
+    if config.turret_rotate_speed:
+        core.append(_comment(depth, "Turret Rotate Speed"))
+        core.append(_field(depth, "Turret_Rotate_Speed", config.turret_rotate_speed))
+
     if config.sfx_event:
         core.append(_comment(depth, "Weapon Fire Sound Effect"))
         core.append(_field(depth, "Fire_SFXEvent", config.sfx_event))

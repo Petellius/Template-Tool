@@ -3,18 +3,24 @@
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 
 from . import app_settings, field_groups, recent_projects, unit_field_groups, hardpoint_field_groups
 from .ui_theme import PALETTES, draw_rounded_rect, icon, icon_text, update_rounded_rect
 from .behaviors import scan_files, merge_with_context
 from .behavior_descriptions import get_description, load_overrides, save_overrides
 from .category_masks import CategoryMaskEntry, is_category_mask_file, parse_category_masks
+from .category_theatres import (
+    load_overrides as load_category_theatre_overrides, save_overrides as save_category_theatre_overrides,
+)
 from .hardpoint_data import PROJECTILE_REFERENCE_TAGS, extract_fields
 from .inheritance import InheritanceCycleError, merge_chain, resolve_chain
 from .project import ClassifiedWarning, Project, ResolvedProject, classify_duplicate_warnings, resolve_project
 from .projectile_classification import ALL_CATEGORIES, build_children_map, classify_all
 from .xml_loader import LoadResult, load_files
 from .project_dialog import ProjectDialog
+from .hardpoint_config_tab import HardpointConfigTab
+from .hardpoint_viewer_tab import HardpointViewerTab
 from .weapon_analysis import analyze as analyze_weapon_config
 from .weapon_config import (
     CONTEXT_HARDPOINT,
@@ -36,7 +42,10 @@ from .weapon_modifiers import (
 )
 from .weapon_config_export import build_hardpoints_file_xml, build_unit_weapons_file_xml
 from .weapon_config_store import load_configs as load_weapon_configs, save_configs as save_weapon_configs
-from .weapon_rules import RULE_FIELDS, WeaponRule, apply_rule, load_rules as load_weapon_rules, save_rules as save_weapon_rules
+from .weapon_rules import (
+    RULE_FIELDS, WeaponRule, apply_rule, load_rules as load_weapon_rules, rule_from_config,
+    save_rules as save_weapon_rules,
+)
 from .combat_sim import simulate as simulate_battle
 from .game_constants import (
     DamageMatrix,
@@ -57,6 +66,51 @@ SQUADRON_TAG = "Squadron"
 
 THEATRE_SPACE = "Space"
 THEATRE_LAND = "Land"
+
+# Non-combat tags a unit's Variant_Of_Existing_Type chain can terminate in;
+# loaded alongside combat units so base-template-only values still resolve.
+TEMPLATE_TAG = "Template"
+WC_BASE_TEMPLATE_TAGS = (
+    SPACEUNIT_TAG, GROUNDVEHICLE_TAG, GROUNDINFANTRY_TAG,
+    TEMPLATE_TAG, CONTAINER_TAG, SQUADRON_TAG, GROUNDCOMPANY_TAG,
+)
+
+# Category masks that are always offered for a theatre even when no loaded
+# combat unit carries them (e.g. Structure/Air/Wall are targets, not units
+# from the SpaceUnit/GroundVehicle/GroundInfantry pools). Names are matched
+# case-insensitively against the project's GameObjectCategoryType enum.
+THEATRE_BASE_CATEGORIES = {
+    THEATRE_SPACE: (
+        "Fighter", "Bomber", "Transport", "Corvette", "Frigate", "Capital", "Super", "Cruiser",
+        "SpaceStructure", "SpaceHero", "Structure", "Hero",
+        "AntiFighter", "AntiBomber", "AntiTransport", "AntiCorvette", "AntiFrigate", "AntiCapital", "AntiSuper",
+        "AntiLight", "AntiMedium", "AntiHeavy", "AntiHero",
+    ),
+    THEATRE_LAND: (
+        "Infantry", "Vehicle", "SmallVehicle", "BigVehicle", "Air", "Structure", "Wall", "Walker",
+        "Repulsorlift", "Tracked", "Artillery", "GroundTransport", "Scout", "Commando", "MeleeUnit", "Jedi",
+        "Organic", "Mechanical", "Droid", "Gunship", "LandHero", "VehicleHero", "Hero", "CanCapture",
+        "AntiInfantry", "AntiVehicle", "AntiAir", "AntiStructure", "AntiHero",
+        "AntiLight", "AntiMedium", "AntiHeavy",
+    ),
+}
+
+# Category Masks tab: what the "applies to" dropdown can assign. The default
+# choice removes the user's override (back to the inferred theatres).
+CATEGORY_THEATRE_DEFAULT = "Default (inferred)"
+CATEGORY_THEATRE_CHOICES = {
+    CATEGORY_THEATRE_DEFAULT: None,
+    "Space only": [THEATRE_SPACE],
+    "Land only": [THEATRE_LAND],
+    "Space and Land": [THEATRE_SPACE, THEATRE_LAND],
+    "Neither": [],
+}
+
+# Filter-combobox sentinels for the Weapon Configs picker.
+WC_FILTER_ALL = "(All)"
+WC_THEATRE_ANY = "Any"
+WC_FILTER_NONE_FACTION = "(No Faction)"
+WC_FILTER_NONE_CATEGORY = "(No CategoryMask)"
 
 UNIT_KIND_UNITS = "Units"
 UNIT_KIND_TEAMS = "Teams"
@@ -228,6 +282,10 @@ class ProjectileViewerApp:
         self.current_project: Project | None = None
         self.resolved_project: ResolvedProject | None = None
         self.category_mask_entries: list[CategoryMaskEntry] = []
+        # User-assigned theatres per mask (Category Masks tab); masks absent
+        # here fall back to the inferred default. See category_theatres.py.
+        self.category_theatre_overrides: dict[str, list[str]] = load_category_theatre_overrides()
+        self._theatre_default_cache: dict[str, set[str]] = {}
         self.children_map: dict[str, list[str]] = {}
         self.name_categories: dict[str, str] = {}
         self._current_projectile_name: str | None = None
@@ -265,6 +323,12 @@ class ProjectileViewerApp:
 
         self.combat_unit_load_result = LoadResult()
         self.all_combat_unit_names: list[str] = []
+        # Combat units plus Template/Container/etc. entries, so a unit's
+        # Variant_Of_Existing_Type chain can be walked up to a base template
+        # that isn't itself a fightable unit.
+        self.wc_inheritance_entries: dict = {}
+        self._wc_unit_meta_cache: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+        self._wc_unit_all_masks_cache: dict[str, frozenset[str]] = {}
         self.damage_matrix = DamageMatrix()
         self.shield_recharge_interval_secs = 1.0
         self._battle_sim_ally_loadout: UnitLoadout | None = None
@@ -354,6 +418,14 @@ class ProjectileViewerApp:
         weapon_rules_tab = ttk.Frame(self.config_notebook)
         self.config_notebook.add(weapon_rules_tab, text=icon_text("weapon_rules", "Weapon Templates"))
         self._build_weapon_rules_tab(weapon_rules_tab)
+
+        hardpoint_configs_tab = ttk.Frame(self.config_notebook)
+        self.config_notebook.add(hardpoint_configs_tab, text=icon_text("weapon_configs", "Hardpoint Configs"))
+        self.hardpoint_config_tab = HardpointConfigTab(self, hardpoint_configs_tab)
+
+        hardpoint_viewer_tab = ttk.Frame(self.config_notebook)
+        self.config_notebook.add(hardpoint_viewer_tab, text=icon_text("hardpoints", "Hardpoint Viewer"))
+        self.hardpoint_viewer_tab = HardpointViewerTab(self, hardpoint_viewer_tab)
 
         weapon_configs_tab = ttk.Frame(self.config_notebook)
         self.config_notebook.add(weapon_configs_tab, text=icon_text("weapon_configs", "Weapon Configs"))
@@ -842,17 +914,40 @@ class ProjectileViewerApp:
         )
         self.category_masks_source_label.pack(anchor=tk.W)
 
-        columns = ("bit", "hex", "description")
+        # Theatre assignment controls: which theatres the selected masks are
+        # offered for in the Weapon Templates tab's category dropdowns.
+        theatre_row = ttk.Frame(parent, padding=(0, 6, 0, 0))
+        theatre_row.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(theatre_row, text="Selected masks apply to:").pack(side=tk.LEFT)
+        self.category_theatre_choice_var = tk.StringVar(value=CATEGORY_THEATRE_DEFAULT)
+        theatre_choice_combo = ttk.Combobox(
+            theatre_row, textvariable=self.category_theatre_choice_var, state="readonly", width=16,
+            values=list(CATEGORY_THEATRE_CHOICES),
+        )
+        theatre_choice_combo.pack(side=tk.LEFT, padx=(6, 6))
+        _autosize_combobox_popdown(theatre_choice_combo)
+        ttk.Button(theatre_row, text="Apply", command=self._on_apply_category_theatres).pack(side=tk.LEFT)
+        ttk.Label(
+            theatre_row,
+            text="(Default = inferred from the units loaded; ctrl/shift-click to select several)",
+            style="Muted.TLabel",
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        columns = ("bit", "hex", "theatres", "description")
         self.category_masks_tree = ttk.Treeview(parent, columns=columns, show="tree headings")
         self.category_masks_tree.heading("#0", text="Tag")
         self.category_masks_tree.heading("bit", text="Bit #")
         self.category_masks_tree.heading("hex", text="Hex Value")
+        self.category_masks_tree.heading("theatres", text="Theatres")
         self.category_masks_tree.heading("description", text="Description")
         self.category_masks_tree.column("#0", width=180, anchor=tk.W)
         self.category_masks_tree.column("bit", width=60, anchor=tk.CENTER)
         self.category_masks_tree.column("hex", width=180, anchor=tk.W)
-        self.category_masks_tree.column("description", width=460, anchor=tk.W)
+        self.category_masks_tree.column("theatres", width=150, anchor=tk.W)
+        self.category_masks_tree.column("description", width=360, anchor=tk.W)
         self.category_masks_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Double-click a row's Theatres cell to pick its theatres inline.
+        self.category_masks_tree.bind("<Double-1>", self._on_category_theatre_cell_click)
         category_masks_scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.category_masks_tree.yview)
         category_masks_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.category_masks_tree.config(yscrollcommand=category_masks_scroll.set)
@@ -1057,18 +1152,129 @@ class ProjectileViewerApp:
         )
         for entry in numbered:
             self.category_masks_tree.insert(
-                "", tk.END, text=entry.name, values=(entry.bit_number, entry.hex_value, entry.description),
+                "", tk.END, iid=entry.name, text=entry.name,
+                values=(entry.bit_number, entry.hex_value, self._category_theatre_label(entry.name), entry.description),
             )
 
         combos = [e for e in self.category_mask_entries if e.bit_number is None]
         if combos:
             combo_group = self.category_masks_tree.insert(
-                "", tk.END, text="Special / Combined Values", open=True, values=("", "", ""),
+                "", tk.END, text="Special / Combined Values", open=True, values=("", "", "", ""),
             )
             for entry in combos:
                 self.category_masks_tree.insert(
-                    combo_group, tk.END, text=entry.name, values=("-", entry.hex_value, entry.description),
+                    combo_group, tk.END, iid=entry.name, text=entry.name,
+                    values=("-", entry.hex_value, self._category_theatre_label(entry.name), entry.description),
                 )
+
+    def _on_category_theatre_cell_click(self, event):
+        """Opens an inline dropdown over the clicked row's Theatres cell and
+        applies the choice to that mask immediately."""
+        tree = self.category_masks_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        # "#3" is the Theatres column (#0 is the tree column, then bit/hex/theatres).
+        if tree.identify_column(event.x) != "#3":
+            return
+        name = tree.identify_row(event.y)
+        if not name or name not in self._category_mask_names():
+            return
+
+        bbox = tree.bbox(name, "#3")
+        if not bbox:
+            return
+        x, y, width, height = bbox
+
+        override = self.category_theatre_overrides.get(name)
+        current = CATEGORY_THEATRE_DEFAULT
+        if override is not None:
+            for label, theatres in CATEGORY_THEATRE_CHOICES.items():
+                if theatres is not None and theatres == override:
+                    current = label
+                    break
+
+        var = tk.StringVar(value=current)
+        combo = ttk.Combobox(
+            tree, textvariable=var, state="readonly", values=list(CATEGORY_THEATRE_CHOICES),
+        )
+        combo.place(x=x, y=y, width=max(width, 150), height=height)
+        combo.focus_set()
+
+        def finish(apply: bool):
+            choice = var.get()
+            combo.destroy()
+            if not apply:
+                return
+            if CATEGORY_THEATRE_CHOICES[choice] is None:
+                self.category_theatre_overrides.pop(name, None)
+            else:
+                self.category_theatre_overrides[name] = list(CATEGORY_THEATRE_CHOICES[choice])
+            save_category_theatre_overrides(self.category_theatre_overrides)
+            self._render_category_masks()
+            if tree.exists(name):
+                tree.selection_set(name)
+            self._refresh_rule_category_choices()
+
+        combo.bind("<<ComboboxSelected>>", lambda _e: finish(True))
+        combo.bind("<Escape>", lambda _e: finish(False))
+        combo.bind("<FocusOut>", lambda _e: combo.winfo_exists() and finish(False))
+        combo.event_generate("<Button-1>")  # drop the list open straight away
+
+    def _category_theatre_label(self, name: str) -> str:
+        theatres, is_default = self._category_theatres(name)
+        text = ", ".join(theatres) if theatres else "Neither"
+        return f"{text} (default)" if is_default else text
+
+    def _on_apply_category_theatres(self):
+        names = [iid for iid in self.category_masks_tree.selection() if iid in self._category_mask_names()]
+        if not names:
+            messagebox.showinfo("No mask selected", "Select one or more category masks first.")
+            return
+
+        choice = self.category_theatre_choice_var.get()
+        for name in names:
+            if choice == CATEGORY_THEATRE_DEFAULT:
+                self.category_theatre_overrides.pop(name, None)
+            else:
+                self.category_theatre_overrides[name] = list(CATEGORY_THEATRE_CHOICES[choice])
+        save_category_theatre_overrides(self.category_theatre_overrides)
+
+        self._render_category_masks()
+        for name in names:
+            if self.category_masks_tree.exists(name):
+                self.category_masks_tree.selection_add(name)
+        self._refresh_rule_category_choices()
+
+    def _category_mask_names(self) -> set[str]:
+        return {e.name for e in self.category_mask_entries}
+
+    def _default_theatre_category_set(self, theatre: str) -> set[str]:
+        """Lower-cased mask names inferred as applicable to `theatre`: the
+        standard list plus any mask its loaded units carry, plus "all".
+        Cached until the loaded units change."""
+        cached = self._theatre_default_cache.get(theatre)
+        if cached is not None:
+            return cached
+
+        tags = self._theatre_tags(theatre)
+        entries = self.combat_unit_load_result.entries
+        used: set[str] = set()
+        for unit_name in self.all_combat_unit_names:
+            if entries[unit_name].element.tag in tags:
+                used |= self._wc_unit_all_masks(unit_name)
+
+        result = {u.lower() for u in used} | {c.lower() for c in THEATRE_BASE_CATEGORIES[theatre]} | {"all"}
+        self._theatre_default_cache[theatre] = result
+        return result
+
+    def _category_theatres(self, name: str) -> tuple[list[str], bool]:
+        """(theatres, is_default) for a mask: the user's override when set,
+        else the inferred default."""
+        override = self.category_theatre_overrides.get(name)
+        if override is not None:
+            return list(override), False
+        lowered = name.lower()
+        return [t for t in (THEATRE_SPACE, THEATRE_LAND) if lowered in self._default_theatre_category_set(t)], True
 
     # -- behaviors --------------------------------------------------------------
 
@@ -1551,7 +1757,19 @@ class ProjectileViewerApp:
         left_frame = ttk.Frame(main_pane, padding=(0, 0, 8, 0))
         main_pane.add(left_frame, weight=1)
 
-        ttk.Label(left_frame, text="Weapon Categories:").pack(anchor=tk.W)
+        filter_row = ttk.Frame(left_frame)
+        filter_row.pack(fill=tk.X)
+        ttk.Label(filter_row, text="Theatre:").pack(side=tk.LEFT)
+        self.weapon_rule_theatre_filter_var = tk.StringVar(value=WC_FILTER_ALL)
+        theatre_filter_combo = ttk.Combobox(
+            filter_row, textvariable=self.weapon_rule_theatre_filter_var, state="readonly",
+            values=[WC_FILTER_ALL, THEATRE_SPACE, THEATRE_LAND], width=8,
+        )
+        theatre_filter_combo.pack(side=tk.LEFT, padx=(6, 0))
+        theatre_filter_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_weapon_rule_theatre_filter_changed())
+        _autosize_combobox_popdown(theatre_filter_combo)
+
+        ttk.Label(left_frame, text="Weapon Categories:").pack(anchor=tk.W, pady=(6, 0))
         list_frame = self._surface_frame(left_frame, padding=4, place=lambda w: w.pack(fill=tk.BOTH, expand=True, pady=(4, 0)))
         self.weapon_rule_tree = ttk.Treeview(list_frame, show="tree")
         self.weapon_rule_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1586,21 +1804,51 @@ class ProjectileViewerApp:
             row=0, column=1, sticky=tk.W, padx=(6, 0)
         )
 
+        ttk.Label(right_scroll, text="Theatre:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        self.weapon_rule_theatre_var = tk.StringVar(value=WC_THEATRE_ANY)
+        rule_theatre_combo = ttk.Combobox(
+            right_scroll, textvariable=self.weapon_rule_theatre_var, state="readonly",
+            values=[WC_THEATRE_ANY, THEATRE_SPACE, THEATRE_LAND], width=10,
+        )
+        rule_theatre_combo.grid(row=1, column=1, sticky=tk.W, padx=(6, 0), pady=(6, 0))
+        rule_theatre_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_rule_category_choices())
+        _autosize_combobox_popdown(rule_theatre_combo)
+
         rule_field_labels = [
             ("Min Recharge (s):", "weapon_rule_min_recharge_var"),
             ("Max Recharge (s):", "weapon_rule_max_recharge_var"),
             ("Pulse Count:", "weapon_rule_pulse_count_var"),
             ("Pulse Delay (s):", "weapon_rule_pulse_delay_var"),
             ("Fire SFX Event:", "weapon_rule_sfx_event_var"),
+            ("Weapon Range:", "weapon_rule_range_var"),
+            ("Fire Cone Width:", "weapon_rule_cone_width_var"),
+            ("Fire Cone Height:", "weapon_rule_cone_height_var"),
+            ("Turret Rotate Speed:", "weapon_rule_turret_speed_var"),
+            ("Default Projectile:", "weapon_rule_default_projectile_var"),
         ]
-        row = 1
+        row = 2
         for label, attr in rule_field_labels:
             ttk.Label(right_scroll, text=label).grid(row=row, column=0, sticky=tk.W, pady=(6, 0))
             var = tk.StringVar()
             setattr(self, attr, var)
-            ttk.Entry(right_scroll, textvariable=var, width=25).grid(
-                row=row, column=1, sticky=tk.W, padx=(6, 0), pady=(6, 0)
-            )
+            if attr == "weapon_rule_default_projectile_var":
+                # Dropdown of the loaded projectiles (type to filter); still
+                # editable so the field can be cleared or typed ahead of a
+                # project load.
+                self.weapon_rule_projectile_combo = ttk.Combobox(right_scroll, textvariable=var, width=40)
+                self.weapon_rule_projectile_combo.grid(
+                    row=row, column=1, sticky=tk.W, padx=(6, 0), pady=(6, 0)
+                )
+                var.trace_add(
+                    "write", lambda *_: self._filter_search_combo(
+                        self.weapon_rule_projectile_combo, self._projectile_names(), self.weapon_rule_default_projectile_var,
+                    )
+                )
+                self._refresh_rule_projectile_combo()
+            else:
+                ttk.Entry(right_scroll, textvariable=var, width=25).grid(
+                    row=row, column=1, sticky=tk.W, padx=(6, 0), pady=(6, 0)
+                )
             row += 1
 
         ttk.Button(
@@ -1608,6 +1856,7 @@ class ProjectileViewerApp:
         ).grid(row=row, column=0, sticky=tk.W, pady=(10, 0))
         row += 1
 
+        rule_combos_start = len(self._category_name_combos)
         accuracy_frame = self._make_card(
             right_scroll, title="Accuracy by Category",
             place=lambda w: w.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(10, 0)),
@@ -1650,9 +1899,49 @@ class ProjectileViewerApp:
             get_list=lambda: self._weapon_rule_category_restrictions,
             on_change=lambda: None,
         )
+        # The accuracy + restriction category dropdowns on this tab follow
+        # the template's theatre (see _refresh_rule_category_choices).
+        self._rule_tab_category_combos = self._category_name_combos[rule_combos_start:]
 
         self._refresh_weapon_rules_list()
         self._show_weapon_rule_placeholder()
+
+    def _make_fitted_tree(self, parent: ttk.Frame, columns: tuple = (), height: int = 4, show: str = "tree headings"):
+        """A Treeview in its own frame with always-visible vertical and
+        horizontal scrollbars, stretched to the full width of `parent` -
+        pair with _fit_tree_columns after every refresh so each column is
+        at least as wide as its data (extra width is shared out).
+        """
+        holder = ttk.Frame(parent)
+        holder.pack(fill=tk.X)
+        holder.columnconfigure(0, weight=1)
+        tree = ttk.Treeview(holder, columns=columns, show=show, height=height)
+        vsb = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=tree.yview)
+        hsb = ttk.Scrollbar(holder, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky=tk.NSEW)
+        vsb.grid(row=0, column=1, sticky=tk.NS)
+        hsb.grid(row=1, column=0, sticky=tk.EW)
+        return tree
+
+    def _fit_tree_columns(self, tree: ttk.Treeview, min_width: int = 90):
+        """Sets every column's minimum width to its widest cell/heading text;
+        the columns still stretch to fill the tree's full width."""
+        try:
+            font = tkfont.nametofont(ttk.Style().lookup("Treeview", "font") or "TkDefaultFont")
+        except tk.TclError:
+            font = tkfont.nametofont("TkDefaultFont")
+        padding = 36
+
+        columns = ["#0", *tree["columns"]]
+        for index, column in enumerate(columns):
+            heading = tree.heading(column, "text") or ""
+            width = font.measure(heading) + padding
+            for iid in tree.get_children(""):
+                text = tree.item(iid, "text") if index == 0 else (tree.item(iid, "values") or ("",))[index - 1]
+                cell = font.measure(str(text)) + padding + (20 if index == 0 else 0)
+                width = max(width, cell)
+            tree.column(column, width=max(width, min_width), minwidth=min_width, stretch=True)
 
     def _build_accuracy_table(
         self, parent: ttk.Frame, tree_attr: str, category_var_attr: str, category_combo_attr: str,
@@ -1668,12 +1957,11 @@ class ProjectileViewerApp:
         GameObjectCategoryType enum (self.category_mask_entries), refreshed
         by _refresh_category_choices whenever a project loads.
         """
-        tree = ttk.Treeview(parent, columns=("value",), show="tree headings", height=4)
+        tree = self._make_fitted_tree(parent, columns=("value",), height=6)
         tree.heading("#0", text="Category")
         tree.heading("value", text="Value")
-        tree.column("#0", width=150, anchor=tk.W)
-        tree.column("value", width=100, anchor=tk.E)
-        tree.pack(fill=tk.X)
+        tree.column("#0", anchor=tk.W)
+        tree.column("value", anchor=tk.E)
         setattr(self, tree_attr, tree)
 
         add_row = ttk.Frame(parent)
@@ -1692,9 +1980,62 @@ class ProjectileViewerApp:
         setattr(self, value_var_attr, value_var)
 
         def refresh():
+            # Stored (dict insertion) order is the priority order - top first.
             tree.delete(*tree.get_children())
-            for category, value in sorted(get_dict().items()):
+            for category, value in get_dict().items():
                 tree.insert("", tk.END, iid=category, text=category, values=(value,))
+            self._fit_tree_columns(tree)
+
+        def commit_tree_order() -> bool:
+            """Rewrites the backing dict in the tree's current row order.
+            Mutates in place so any other reference to the dict stays valid.
+            Returns True when the order actually changed.
+            """
+            data = get_dict()
+            order = list(tree.get_children())
+            if order == list(data.keys()):
+                return False
+            items = [(c, data[c]) for c in order if c in data]
+            data.clear()
+            data.update(items)
+            return True
+
+        drag_state = {"iid": None}
+
+        def on_drag_start(event):
+            drag_state["iid"] = tree.identify_row(event.y) or None
+
+        def on_drag_motion(event):
+            dragged = drag_state["iid"]
+            if dragged is None:
+                return
+            tree.config(cursor="fleur")
+            target = tree.identify_row(event.y)
+            if target and target != dragged:
+                tree.move(dragged, "", tree.index(target))
+
+        def on_drag_end(_event):
+            dragged = drag_state["iid"]
+            drag_state["iid"] = None
+            tree.config(cursor="")
+            if dragged is not None and commit_tree_order():
+                on_change()
+
+        tree.bind("<ButtonPress-1>", on_drag_start, add="+")
+        tree.bind("<B1-Motion>", on_drag_motion)
+        tree.bind("<ButtonRelease-1>", on_drag_end, add="+")
+
+        def move_selected(offset: int):
+            selection = tree.selection()
+            if not selection:
+                return
+            iid = selection[0]
+            new_index = tree.index(iid) + offset
+            if not 0 <= new_index < len(tree.get_children()):
+                return
+            tree.move(iid, "", new_index)
+            if commit_tree_order():
+                on_change()
 
         def on_add():
             category = category_var.get().strip()
@@ -1719,6 +2060,12 @@ class ProjectileViewerApp:
             add_row, text=icon_text("remove", "Remove Selected"), command=on_remove,
         ).pack(side=tk.LEFT, padx=(4, 0))
 
+        order_row = ttk.Frame(parent)
+        order_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(order_row, text="Drag rows to set priority (top = highest).").pack(side=tk.LEFT)
+        ttk.Button(order_row, text="Move Down", command=lambda: move_selected(1)).pack(side=tk.RIGHT)
+        ttk.Button(order_row, text="Move Up", command=lambda: move_selected(-1)).pack(side=tk.RIGHT, padx=(0, 4))
+
         refresh()
         return refresh
 
@@ -1729,8 +2076,8 @@ class ProjectileViewerApp:
         "Category, value" pairs, so this is a simpler one-column sibling to
         _build_accuracy_table sharing the same category dropdown source.
         """
-        tree = ttk.Treeview(parent, show="tree", height=4)
-        tree.pack(fill=tk.X)
+        tree = self._make_fitted_tree(parent, height=6, show="tree")
+        tree.heading("#0", text="Category")
         setattr(self, tree_attr, tree)
 
         add_row = ttk.Frame(parent)
@@ -1746,6 +2093,7 @@ class ProjectileViewerApp:
             tree.delete(*tree.get_children())
             for category in get_list():
                 tree.insert("", tk.END, iid=category, text=category)
+            self._fit_tree_columns(tree, min_width=210)
 
         def on_add():
             category = combo_var.get().strip()
@@ -1783,14 +2131,92 @@ class ProjectileViewerApp:
         per-project into self.category_mask_entries (Category Masks tab).
         """
         names = sorted(e.name for e in self.category_mask_entries)
+        rule_tab_combos = getattr(self, "_rule_tab_category_combos", [])
         for combo in self._category_name_combos:
+            if combo in rule_tab_combos:
+                continue
+            combo.config(values=names)
+            _autosize_combobox_popdown(combo)
+        self._refresh_rule_category_choices()
+
+    def _wc_unit_all_masks(self, name: str) -> frozenset[str]:
+        """Every CategoryMask token on a unit (including "Anti*" ones), from
+        its merged Variant_Of_Existing_Type chain; cached per unit."""
+        cached = self._wc_unit_all_masks_cache.get(name)
+        if cached is not None:
+            return cached
+        entries = self.wc_inheritance_entries or self.combat_unit_load_result.entries
+        try:
+            resolved = merge_chain(entries, resolve_chain(entries, name))
+        except InheritanceCycleError:
+            resolved = {}
+        entry = resolved.get("CategoryMask")
+        masks = frozenset(
+            p.strip() for p in entry.value.replace("|", ",").split(",") if p.strip()
+        ) if entry is not None else frozenset()
+        self._wc_unit_all_masks_cache[name] = masks
+        return masks
+
+    def _category_names_for_theatre(self, theatre: str | None) -> list[str]:
+        """Category masks that apply to `theatre` (Space/Land). Each mask uses
+        the user's assignment from the Category Masks tab when there is one,
+        otherwise the inferred default (THEATRE_BASE_CATEGORIES - targets such
+        as Structure/Air never appear on the loaded combat units themselves -
+        plus any mask its loaded units use); "All" is always offered. Only
+        names in the project's enum are offered. With no theatre, every enum
+        entry is offered.
+        """
+        all_names = sorted(e.name for e in self.category_mask_entries)
+        if theatre not in (THEATRE_SPACE, THEATRE_LAND):
+            return all_names
+
+        return [n for n in all_names if theatre in self._category_theatres(n)[0] or n.lower() == "all"]
+
+    def _effective_rule_theatre(self) -> str | None:
+        """The theatre the Weapon Templates tab's category dropdowns follow:
+        the list filter when it's set to Space/Land, else the open
+        template's own theatre."""
+        chosen = self.weapon_rule_theatre_filter_var.get()
+        if chosen in (THEATRE_SPACE, THEATRE_LAND):
+            return chosen
+        rule_theatre = self.weapon_rule_theatre_var.get()
+        return rule_theatre if rule_theatre in (THEATRE_SPACE, THEATRE_LAND) else None
+
+    def _refresh_hardpoint_config_tab(self):
+        tab = getattr(self, "hardpoint_config_tab", None)
+        if tab is not None:
+            tab.refresh_choices()
+
+    def _refresh_hardpoint_viewer(self):
+        viewer = getattr(self, "hardpoint_viewer_tab", None)
+        if viewer is not None:
+            viewer.refresh()
+
+    def _refresh_rule_category_choices(self):
+        self._refresh_hardpoint_config_tab()
+        if not hasattr(self, "weapon_rule_theatre_filter_var"):
+            return
+        names = self._category_names_for_theatre(self._effective_rule_theatre())
+        for combo in getattr(self, "_rule_tab_category_combos", []):
             combo.config(values=names)
             _autosize_combobox_popdown(combo)
 
+    def _on_weapon_rule_theatre_filter_changed(self):
+        self._refresh_weapon_rules_list()
+        self._refresh_rule_category_choices()
+
     def _refresh_weapon_rules_list(self):
+        chosen = self.weapon_rule_theatre_filter_var.get() if hasattr(self, "weapon_rule_theatre_filter_var") else WC_FILTER_ALL
         self.weapon_rule_tree.delete(*self.weapon_rule_tree.get_children())
         for category in sorted(self.weapon_rules):
+            rule_theatre = self.weapon_rules[category].theatre
+            # A template with no theatre applies to either, so it always shows.
+            if chosen != WC_FILTER_ALL and rule_theatre not in ("", chosen):
+                continue
             self.weapon_rule_tree.insert("", tk.END, iid=category, text=category)
+
+        # Keep the Hardpoint Configs tab's template dropdown in sync too.
+        self._refresh_hardpoint_config_tab()
 
         # Keep the Weapon Configs tab's Category picker in sync too.
         if hasattr(self, "weapon_config_category_combo"):
@@ -1806,10 +2232,15 @@ class ProjectileViewerApp:
 
     def _show_weapon_rule_placeholder(self):
         self._current_rule_category = None
-        self._set_weapon_rule_field_vars(WeaponRule(category=""))
+        # A new template starts in whichever theatre the list is filtered to.
+        chosen = self.weapon_rule_theatre_filter_var.get()
+        default_theatre = chosen if chosen in (THEATRE_SPACE, THEATRE_LAND) else ""
+        self._set_weapon_rule_field_vars(WeaponRule(category="", theatre=default_theatre))
 
     def _set_weapon_rule_field_vars(self, rule: WeaponRule):
         self.weapon_rule_category_var.set(rule.category)
+        self.weapon_rule_theatre_var.set(rule.theatre or WC_THEATRE_ANY)
+        self._refresh_rule_category_choices()
         self._weapon_rule_accuracy = dict(rule.accuracy_by_category)
         self._refresh_weapon_rule_accuracy_tree()
         self.weapon_rule_min_recharge_var.set(str(rule.fire_min_recharge))
@@ -1817,6 +2248,11 @@ class ProjectileViewerApp:
         self.weapon_rule_pulse_count_var.set(str(rule.fire_pulse_count))
         self.weapon_rule_pulse_delay_var.set(str(rule.fire_pulse_delay))
         self.weapon_rule_sfx_event_var.set(rule.sfx_event)
+        self.weapon_rule_range_var.set(str(rule.fire_range))
+        self.weapon_rule_cone_width_var.set(str(rule.fire_cone_width))
+        self.weapon_rule_cone_height_var.set(str(rule.fire_cone_height))
+        self.weapon_rule_turret_speed_var.set(str(rule.turret_rotate_speed))
+        self.weapon_rule_default_projectile_var.set(rule.default_projectile)
         self._weapon_rule_modifiers = dict(rule.modifiers)
         self._refresh_weapon_rule_modifiers_tree()
         self._weapon_rule_category_restrictions = list(rule.category_restrictions)
@@ -1840,6 +2276,15 @@ class ProjectileViewerApp:
             sfx_event=self.weapon_rule_sfx_event_var.get().strip(),
             modifiers=dict(self._weapon_rule_modifiers),
             category_restrictions=list(self._weapon_rule_category_restrictions),
+            fire_range=weapon_config_to_float(self.weapon_rule_range_var.get()),
+            fire_cone_width=weapon_config_to_float(self.weapon_rule_cone_width_var.get()),
+            fire_cone_height=weapon_config_to_float(self.weapon_rule_cone_height_var.get()),
+            turret_rotate_speed=weapon_config_to_float(self.weapon_rule_turret_speed_var.get()),
+            default_projectile=self.weapon_rule_default_projectile_var.get().strip(),
+            theatre=(
+                self.weapon_rule_theatre_var.get()
+                if self.weapon_rule_theatre_var.get() in (THEATRE_SPACE, THEATRE_LAND) else ""
+            ),
         )
 
     def _on_new_weapon_rule(self):
@@ -1861,8 +2306,10 @@ class ProjectileViewerApp:
         self._current_rule_category = rule.category
 
         self._refresh_weapon_rules_list()
-        self.weapon_rule_tree.selection_set(rule.category)
-        self.weapon_rule_tree.see(rule.category)
+        # The list filter may hide a template saved with a different theatre.
+        if self.weapon_rule_tree.exists(rule.category):
+            self.weapon_rule_tree.selection_set(rule.category)
+            self.weapon_rule_tree.see(rule.category)
 
     def _on_delete_weapon_rule(self):
         category = self._current_rule_category
@@ -1891,10 +2338,26 @@ class ProjectileViewerApp:
         theatre_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_wc_theatre_changed())
         _autosize_combobox_popdown(theatre_combo)
 
-        ttk.Label(picker_row, text="Unit:").grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(picker_row, text="Faction:").grid(row=0, column=2, sticky=tk.W)
+        self.wc_faction_var = tk.StringVar(value=WC_FILTER_ALL)
+        self.wc_faction_combo = ttk.Combobox(
+            picker_row, textvariable=self.wc_faction_var, state="readonly", values=[WC_FILTER_ALL], width=16,
+        )
+        self.wc_faction_combo.grid(row=0, column=3, sticky=tk.W, padx=(6, 20))
+        self.wc_faction_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_wc_faction_changed())
+
+        ttk.Label(picker_row, text="CategoryMask:").grid(row=0, column=4, sticky=tk.W)
+        self.wc_category_var = tk.StringVar(value=WC_FILTER_ALL)
+        self.wc_category_combo = ttk.Combobox(
+            picker_row, textvariable=self.wc_category_var, state="readonly", values=[WC_FILTER_ALL], width=18,
+        )
+        self.wc_category_combo.grid(row=0, column=5, sticky=tk.W, padx=(6, 20))
+        self.wc_category_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_wc_category_changed())
+
+        ttk.Label(picker_row, text="Unit:").grid(row=0, column=6, sticky=tk.W)
         self.wc_unit_var = tk.StringVar()
         self.wc_unit_combo = ttk.Combobox(picker_row, textvariable=self.wc_unit_var, width=40)
-        self.wc_unit_combo.grid(row=0, column=3, sticky=tk.W, padx=(6, 6))
+        self.wc_unit_combo.grid(row=0, column=7, sticky=tk.W, padx=(6, 6))
         self.wc_unit_var.trace_add(
             "write", lambda *_: self._filter_search_combo(
                 self.wc_unit_combo, self._wc_unit_names_for_theatre(), self.wc_unit_var,
@@ -1999,6 +2462,9 @@ class ProjectileViewerApp:
         # per slot.
         rule_field_specs = [
             ("Range:", "fire_range", "weapon_config_range_var"),
+            ("Fire Cone Width:", "fire_cone_width", "weapon_config_cone_width_var"),
+            ("Fire Cone Height:", "fire_cone_height", "weapon_config_cone_height_var"),
+            ("Turret Rotate Speed:", "turret_rotate_speed", "weapon_config_turret_speed_var"),
             ("Damage:", "damage", "weapon_config_damage_var"),
             ("Damage Type:", "damage_type", "weapon_config_damage_type_var"),
             ("Min Recharge (s):", "fire_min_recharge", "weapon_config_min_recharge_var"),
@@ -2126,12 +2592,11 @@ class ProjectileViewerApp:
         """
         label_to_spec: dict[str, object] = {}
 
-        tree = ttk.Treeview(parent, columns=("value",), show="tree headings", height=5)
+        tree = self._make_fitted_tree(parent, columns=("value",), height=8)
         tree.heading("#0", text="Modifier")
         tree.heading("value", text="Value")
-        tree.column("#0", width=300, anchor=tk.W)
-        tree.column("value", width=80, anchor=tk.E)
-        tree.pack(fill=tk.X)
+        tree.column("#0", anchor=tk.W)
+        tree.column("value", anchor=tk.E)
         setattr(self, tree_attr, tree)
 
         desc_label = ttk.Label(parent, text="", style="Muted.TLabel", wraplength=460, justify=tk.LEFT)
@@ -2160,6 +2625,7 @@ class ProjectileViewerApp:
                 spec = MODIFIERS_BY_KEY.get(key)
                 label = spec.label if spec is not None else key
                 tree.insert("", tk.END, iid=key, text=label, values=(value,))
+            self._fit_tree_columns(tree)
 
         def refresh_specs():
             specs = get_specs()
@@ -2251,12 +2717,128 @@ class ProjectileViewerApp:
     def _theatre_tags(self, theatre: str) -> tuple[str, ...]:
         return (SPACEUNIT_TAG,) if theatre == THEATRE_SPACE else (GROUNDVEHICLE_TAG, GROUNDINFANTRY_TAG)
 
-    def _wc_unit_names_for_theatre(self) -> list[str]:
+    def _wc_theatre_unit_names(self) -> list[str]:
         tags = self._theatre_tags(self.wc_theatre_var.get())
         entries = self.combat_unit_load_result.entries
         return sorted(n for n in self.all_combat_unit_names if entries[n].element.tag in tags)
 
+    def _wc_unit_faction_categories(self, name: str) -> tuple[frozenset[str], frozenset[str]]:
+        """(factions, categories) for a unit, read from its fully merged
+        Variant_Of_Existing_Type chain so values defined only on a base
+        template are found. Both are "|" or comma-separated lists in the XML;
+        only the first non-"Anti*" CategoryMask is kept to identify the unit.
+        """
+        cached = self._wc_unit_meta_cache.get(name)
+        if cached is not None:
+            return cached
+
+        def _split(field: str, resolved: dict) -> frozenset[str]:
+            entry = resolved.get(field)
+            if entry is None:
+                return frozenset()
+            return frozenset(p.strip() for p in entry.value.replace("|", ",").split(",") if p.strip())
+
+        entries = self.wc_inheritance_entries or self.combat_unit_load_result.entries
+        try:
+            resolved = merge_chain(entries, resolve_chain(entries, name))
+        except InheritanceCycleError:
+            resolved = {}
+        category_entry = resolved.get("CategoryMask")
+        # CategoryMask is "|"-separated in EAW XML (e.g. "Corvette | AntiLight").
+        parts = (
+            [p.strip() for p in category_entry.value.replace("|", ",").split(",") if p.strip()]
+            if category_entry else []
+        )
+        # Only the first hull-class CategoryMask identifies the unit; the
+        # "Anti*" targeting masks (AntiFighter, AntiLight, ...) aren't a class.
+        class_parts = [p for p in parts if not p.lower().startswith("anti")]
+        first_category = frozenset(class_parts[:1])
+        result = (_split("Affiliation", resolved), first_category)
+        self._wc_unit_meta_cache[name] = result
+        return result
+
+    def _wc_filtered_unit_names(self, faction: str | None = None, category: str | None = None) -> list[str]:
+        """Theatre units narrowed by the Faction / CategoryMask filters.
+        `faction`/`category` default to the combobox selections; pass an
+        explicit value (or WC_FILTER_ALL) to compute a cascade level.
+        """
+        faction = self.wc_faction_var.get() if faction is None else faction
+        category = self.wc_category_var.get() if category is None else category
+        names = []
+        for n in self._wc_theatre_unit_names():
+            factions, categories = self._wc_unit_faction_categories(n)
+            if faction != WC_FILTER_ALL:
+                if faction == WC_FILTER_NONE_FACTION:
+                    if factions:
+                        continue
+                elif faction not in factions:
+                    continue
+            if category != WC_FILTER_ALL:
+                if category == WC_FILTER_NONE_CATEGORY:
+                    if categories:
+                        continue
+                elif category not in categories:
+                    continue
+            names.append(n)
+        return names
+
+    # Kept as the single filter point the unit combobox's search trace uses.
+    def _wc_unit_names_for_theatre(self) -> list[str]:
+        return self._wc_filtered_unit_names()
+
+    def _refresh_wc_filter_combos(self):
+        """Rebuilds Faction options from the theatre's units and CategoryMask
+        options from units matching the chosen Faction, dropping any stale
+        selection back to (All).
+        """
+        theatre_names = self._wc_theatre_unit_names()
+        factions: set[str] = set()
+        has_no_faction = False
+        for n in theatre_names:
+            f, _c = self._wc_unit_faction_categories(n)
+            factions |= f
+            has_no_faction = has_no_faction or not f
+        faction_values = [WC_FILTER_ALL, *sorted(factions, key=str.lower)]
+        if has_no_faction:
+            faction_values.append(WC_FILTER_NONE_FACTION)
+        self.wc_faction_combo.config(values=faction_values)
+        if self.wc_faction_var.get() not in faction_values:
+            self.wc_faction_var.set(WC_FILTER_ALL)
+        _autosize_combobox_popdown(self.wc_faction_combo)
+
+        categories: set[str] = set()
+        has_no_category = False
+        for n in self._wc_filtered_unit_names(category=WC_FILTER_ALL):
+            _f, c = self._wc_unit_faction_categories(n)
+            categories |= c
+            has_no_category = has_no_category or not c
+        category_values = [WC_FILTER_ALL, *sorted(categories, key=str.lower)]
+        if has_no_category:
+            category_values.append(WC_FILTER_NONE_CATEGORY)
+        self.wc_category_combo.config(values=category_values)
+        if self.wc_category_var.get() not in category_values:
+            self.wc_category_var.set(WC_FILTER_ALL)
+        _autosize_combobox_popdown(self.wc_category_combo)
+
+    def _projectile_names(self) -> list[str]:
+        return sorted(self.load_result.entries.keys(), key=str.lower)
+
+    def _refresh_rule_projectile_combo(self):
+        """Repopulates the template's Default Projectile dropdown and sizes
+        both its entry box and popdown to the longest projectile name."""
+        combo = getattr(self, "weapon_rule_projectile_combo", None)
+        if combo is None:
+            return
+        names = self._projectile_names()
+        longest = max((len(n) for n in names), default=0)
+        combo.config(width=max(longest + 2, 25))
+        self._filter_search_combo(combo, names, self.weapon_rule_default_projectile_var)
+
     def _refresh_wc_unit_combo(self):
+        self._refresh_rule_projectile_combo()
+        self._refresh_hardpoint_config_tab()
+        self._refresh_hardpoint_viewer()
+        self._refresh_wc_filter_combos()
         self._filter_search_combo(self.wc_unit_combo, self._wc_unit_names_for_theatre(), self.wc_unit_var)
         self._filter_search_combo(
             self.weapon_config_category_combo, sorted(self.weapon_rules), self.weapon_config_category_var,
@@ -2264,8 +2846,19 @@ class ProjectileViewerApp:
 
     def _on_wc_theatre_changed(self):
         self.wc_unit_var.set("")
+        self.wc_faction_var.set(WC_FILTER_ALL)
+        self.wc_category_var.set(WC_FILTER_ALL)
         self._refresh_wc_unit_combo()
         self._load_wc_unit(None)
+
+    def _on_wc_faction_changed(self):
+        self.wc_category_var.set(WC_FILTER_ALL)
+        self.wc_unit_var.set("")
+        self._refresh_wc_unit_combo()
+
+    def _on_wc_category_changed(self):
+        self.wc_unit_var.set("")
+        self._refresh_wc_unit_combo()
 
     def _on_wc_unit_selected(self, _event=None):
         name = self.wc_unit_var.get().strip()
@@ -2412,6 +3005,14 @@ class ProjectileViewerApp:
         for widget in self._weapon_config_field_rows["fire_max_recharge"]["widgets"]:
             widget.grid_remove() if is_unit_weapon else widget.grid()
 
+        # Fire cone / turret rotate speed are HardPoint-schema tags - the
+        # direct unit-weapon schema has no equivalent, so hide them there.
+        for field_name in ("fire_cone_width", "fire_cone_height", "turret_rotate_speed"):
+            row_info = self._weapon_config_field_rows[field_name]
+            row_widgets = [row_info["label"], *row_info["widgets"]]
+            for widget in row_widgets:
+                widget.grid_remove() if is_unit_weapon else widget.grid()
+
         # Modifiers apply to both schemas, but which concepts are valid
         # differs (e.g. Power-to-Weapons mode is hardpoint/ship-only; the
         # deployed-state movement fields are direct-unit-weapon-only) - the
@@ -2436,6 +3037,9 @@ class ProjectileViewerApp:
             self.weapon_config_pulse_count_var.set(str(config.fire_pulse_count))
             self.weapon_config_pulse_delay_var.set(str(config.fire_pulse_delay))
             self.weapon_config_range_var.set(str(config.fire_range))
+            self.weapon_config_cone_width_var.set(str(config.fire_cone_width))
+            self.weapon_config_cone_height_var.set(str(config.fire_cone_height))
+            self.weapon_config_turret_speed_var.set(str(config.turret_rotate_speed))
             self.weapon_config_sfx_event_var.set(config.sfx_event)
         finally:
             self._weapon_config_field_traces_suspended = False
@@ -2483,6 +3087,9 @@ class ProjectileViewerApp:
             fire_pulse_count=weapon_config_to_int(self.weapon_config_pulse_count_var.get()),
             fire_pulse_delay=weapon_config_to_float(self.weapon_config_pulse_delay_var.get()),
             fire_range=weapon_config_to_float(self.weapon_config_range_var.get()),
+            fire_cone_width=weapon_config_to_float(self.weapon_config_cone_width_var.get()),
+            fire_cone_height=weapon_config_to_float(self.weapon_config_cone_height_var.get()),
+            turret_rotate_speed=weapon_config_to_float(self.weapon_config_turret_speed_var.get()),
             accuracy_by_category=dict(self._weapon_config_accuracy),
             sfx_event=self.weapon_config_sfx_event_var.get().strip(),
             modifiers=dict(self._weapon_config_modifiers),
@@ -2543,33 +3150,11 @@ class ProjectileViewerApp:
             self._apply_slot_config(config)
             return
 
-        if field_name == "fire_range":
-            # Not rule-governed either (a saved template describes a
-            # category of weapon, not one unit's engagement distance) - a
-            # WeaponRule.apply_rule() call would silently no-op on it since
-            # it's deliberately excluded from RULE_FIELDS, so bypass that
-            # branch entirely and re-seed straight from the real source,
-            # same as damage/damage_type above.
-            if config.context == CONTEXT_HARDPOINT:
-                entry = self.hardpoint_load_result.entries.get(config.source_hardpoint_name)
-                if entry is not None:
-                    seed_from_hardpoint(config, extract_fields(entry.element))
-            elif config.context == CONTEXT_UNIT_WEAPON:
-                entries = self.combat_unit_load_result.entries
-                if config.unit_name in entries:
-                    try:
-                        chain = resolve_chain(entries, config.unit_name)
-                        resolved_fields = merge_chain(entries, chain)
-                        seed_from_unit_weapon(config, resolved_fields, entries, chain)
-                    except InheritanceCycleError as exc:
-                        messagebox.showerror("Inheritance cycle", str(exc))
-            self._apply_slot_config(config)
-            return
-
-        rule = self.weapon_rules.get(config.category)
-        if rule is not None:
-            apply_rule(config, rule)
-        elif config.context == CONTEXT_HARDPOINT:
+        # Re-seed from the slot's real source first, then let the category
+        # rule (if any) override whatever it actually defines. Rule fields a
+        # template leaves unset (e.g. range on older templates) therefore
+        # fall back to the seeded value instead of keeping the stale edit.
+        if config.context == CONTEXT_HARDPOINT:
             entry = self.hardpoint_load_result.entries.get(config.source_hardpoint_name)
             if entry is not None:
                 seed_from_hardpoint(config, extract_fields(entry.element))
@@ -2583,7 +3168,24 @@ class ProjectileViewerApp:
                 except InheritanceCycleError as exc:
                     messagebox.showerror("Inheritance cycle", str(exc))
 
+        rule = self.weapon_rules.get(config.category)
+        if rule is not None:
+            apply_rule(config, rule)
+            self._reseed_damage_from_projectile(config)
+
         self._apply_slot_config(config)
+
+    def _reseed_damage_from_projectile(self, config: WeaponConfig):
+        """Re-reads damage/damage_type from the config's (possibly just
+        rule-changed) source projectile, leaving overridden values alone."""
+        name = config.source_projectile_name
+        if not name or name not in self.load_result.entries:
+            return
+        try:
+            proj_chain = resolve_chain(self.load_result.entries, name)
+            seed_from_projectile(config, merge_chain(self.load_result.entries, proj_chain))
+        except InheritanceCycleError as exc:
+            messagebox.showerror("Inheritance cycle", str(exc))
 
     def _on_apply_weapon_rule(self):
         category = self.weapon_config_category_var.get().strip()
@@ -2595,6 +3197,7 @@ class ProjectileViewerApp:
         config = self._read_weapon_config_from_fields()
         config.category = category
         apply_rule(config, rule)
+        self._reseed_damage_from_projectile(config)
         self._apply_slot_config(config)
 
     def _on_create_rule_from_slot(self):
@@ -2626,16 +3229,8 @@ class ProjectileViewerApp:
             ):
                 return
 
-        rule = WeaponRule(
-            category=category,
-            accuracy_by_category=dict(config.accuracy_by_category),
-            fire_min_recharge=config.fire_min_recharge,
-            fire_max_recharge=config.fire_max_recharge,
-            fire_pulse_count=config.fire_pulse_count,
-            fire_pulse_delay=config.fire_pulse_delay,
-            sfx_event=config.sfx_event,
-            modifiers=dict(config.modifiers),
-            category_restrictions=list(config.category_restrictions),
+        rule = rule_from_config(
+            config, category, theatre=self.wc_theatre_var.get(), include_projectile=True,
         )
         self.weapon_rules[category] = rule
         save_weapon_rules(list(self.weapon_rules.values()))
@@ -2829,6 +3424,18 @@ class ProjectileViewerApp:
         tags = [SPACEUNIT_TAG, GROUNDVEHICLE_TAG, GROUNDINFANTRY_TAG]
         self.combat_unit_load_result = load_files(file_paths, tags, preferred_files=preferred_files or set())
         self.all_combat_unit_names = sorted(self.combat_unit_load_result.entries.keys())
+
+        base_pool = load_files(file_paths, list(WC_BASE_TEMPLATE_TAGS), preferred_files=preferred_files or set())
+        self.wc_inheritance_entries = {**base_pool.entries, **self.combat_unit_load_result.entries}
+        self._wc_unit_meta_cache = {}
+        self._wc_unit_all_masks_cache = {}
+        self._theatre_default_cache = {}
+        if hasattr(self, "wc_faction_combo"):
+            self._refresh_wc_unit_combo()
+        # Units just changed, so the inferred theatre of each mask did too.
+        self._refresh_rule_category_choices()
+        if self.category_mask_entries and hasattr(self, "category_masks_tree"):
+            self._render_category_masks()
 
         gc_path = find_game_constants_file(file_paths)
         if gc_path is not None:

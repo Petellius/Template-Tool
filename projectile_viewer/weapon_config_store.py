@@ -13,7 +13,7 @@ DEFAULT_PATH = os.path.join(
 SCHEMA_VERSION = 1
 
 
-def _config_to_dict(config: WeaponConfig) -> dict:
+def config_to_dict(config: WeaponConfig) -> dict:
     return {
         "name": config.name,
         "unit_name": config.unit_name,
@@ -28,6 +28,9 @@ def _config_to_dict(config: WeaponConfig) -> dict:
         "fire_pulse_count": config.fire_pulse_count,
         "fire_pulse_delay": config.fire_pulse_delay,
         "fire_range": config.fire_range,
+        "fire_cone_width": config.fire_cone_width,
+        "fire_cone_height": config.fire_cone_height,
+        "turret_rotate_speed": config.turret_rotate_speed,
         "accuracy_by_category": dict(config.accuracy_by_category),
         "sfx_event": config.sfx_event,
         "modifiers": dict(config.modifiers),
@@ -38,7 +41,7 @@ def _config_to_dict(config: WeaponConfig) -> dict:
     }
 
 
-def _dict_to_config(data: dict) -> WeaponConfig:
+def dict_to_config(data: dict) -> WeaponConfig:
     return WeaponConfig(
         name=data.get("name", "Untitled"),
         unit_name=data.get("unit_name", ""),
@@ -53,6 +56,9 @@ def _dict_to_config(data: dict) -> WeaponConfig:
         fire_pulse_count=data.get("fire_pulse_count", 1),
         fire_pulse_delay=data.get("fire_pulse_delay", 0.0),
         fire_range=data.get("fire_range", 0.0),
+        fire_cone_width=data.get("fire_cone_width", 0.0),
+        fire_cone_height=data.get("fire_cone_height", 0.0),
+        turret_rotate_speed=data.get("turret_rotate_speed", 0.0),
         accuracy_by_category=dict(data.get("accuracy_by_category", {})),
         sfx_event=data.get("sfx_event", ""),
         modifiers=dict(data.get("modifiers", {})),
@@ -61,6 +67,12 @@ def _dict_to_config(data: dict) -> WeaponConfig:
         overridden_fields=set(data.get("overridden_fields", [])),
         override_notes=dict(data.get("override_notes", {})),
     )
+
+
+# Public names are shared with hardpoint_config_store (embedded weapon block);
+# the old private names stay as aliases.
+_config_to_dict = config_to_dict
+_dict_to_config = dict_to_config
 
 
 def load_configs(path: str = DEFAULT_PATH) -> list[WeaponConfig]:
@@ -72,12 +84,12 @@ def load_configs(path: str = DEFAULT_PATH) -> list[WeaponConfig]:
     except (OSError, json.JSONDecodeError):
         return []
 
-    return [_dict_to_config(entry) for entry in data.get("configs", [])]
+    return [dict_to_config(entry) for entry in data.get("configs", [])]
 
 
 def save_configs(configs: list[WeaponConfig], path: str = DEFAULT_PATH) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {"version": SCHEMA_VERSION, "configs": [_config_to_dict(c) for c in configs]}
+    payload = {"version": SCHEMA_VERSION, "configs": [config_to_dict(c) for c in configs]}
 
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:

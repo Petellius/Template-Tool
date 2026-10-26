@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "theatres": {
+    "AntiAir": [],
+    "AntiBomber": [],
+    "AntiCapital": [],
+    "AntiCorvette": [],
+    "AntiFighter": [],
+    "AntiFrigate": [],
+    "AntiHeavy": [],
+    "AntiHero": [],
+    "AntiInfantry": [],
+    "AntiLight": [],
+    "AntiMedium": [],
+    "AntiStructure": [],
+    "AntiSuper": [],
+    "AntiTransport": [],
+    "AntiVehicle": [],
+    "CanCapture": [],
+    "Gunship": [
+      "Space"
+    ],
+    "Hero": [],
+    "Spawner": []
+  }
+}

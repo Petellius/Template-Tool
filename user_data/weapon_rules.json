@@ -1,17 +1,71 @@
 {
-  "version": 1,
+  "version": 2,
   "rules": [
     {
-      "category": "Venator Turret",
+      "category": "Dual Laser Cannon",
+      "accuracy_by_category": {
+        "Fighter": 36.0,
+        "Bomber": 3.0,
+        "Transport": 25.0,
+        "Corvette": 25.0,
+        "Frigate": 25.0,
+        "Cruiser": 20.0,
+        "Capital": 20.0,
+        "Super": 20.0
+      },
+      "fire_min_recharge": 2.0,
+      "fire_max_recharge": 4.5,
+      "fire_pulse_count": 3,
+      "fire_pulse_delay": 0.35,
+      "sfx_event": "Generic_LaserCannon",
+      "modifiers": {
+        "allow_opportunity_fire_when_targeting": "True",
+        "allow_opportunity_fire_when_idle": "True",
+        "fire_when_in_power_to_weapons_mode": "No"
+      },
+      "category_restrictions": [],
+      "fire_range": 1500.0,
+      "fire_cone_width": 90.0,
+      "fire_cone_height": 90.0,
+      "turret_rotate_speed": 0.0,
+      "default_projectile": "",
+      "theatre": "Space"
+    },
+    {
+      "category": "Heavy Proton Torpedo",
+      "accuracy_by_category": {
+        "All": 20.0
+      },
+      "fire_min_recharge": 25.0,
+      "fire_max_recharge": 40.0,
+      "fire_pulse_count": 3,
+      "fire_pulse_delay": 0.7,
+      "sfx_event": "Generic_ProtonTorpedo",
+      "modifiers": {
+        "allow_opportunity_fire_when_targeting": "False",
+        "allow_opportunity_fire_when_idle": "True"
+      },
+      "category_restrictions": [
+        "Fighter",
+        "Bomber",
+        "Transport"
+      ],
+      "fire_range": 6000.0,
+      "fire_cone_width": 60.0,
+      "fire_cone_height": 90.0,
+      "turret_rotate_speed": 0.0,
+      "default_projectile": "",
+      "theatre": "Space"
+    },
+    {
+      "category": "Dual Heavy Turbolaser",
       "accuracy_by_category": {
         "Fighter": 100.0,
         "Bomber": 100.0,
         "Transport": 65.0,
         "Corvette": 60.0,
         "Frigate": 60.0,
-        "Cruiser": 50.0,
-        "Capital": 45.0,
-        "Super": 45.0
+        "All": 45.0
       },
       "fire_min_recharge": 7.0,
       "fire_max_recharge": 18.0,
@@ -24,7 +78,42 @@
         "fire_when_in_power_to_weapons_mode": "Yes",
         "power_to_weapons_mode_weapon_delay_multiplier": "0.25"
       },
-      "category_restrictions": []
+      "category_restrictions": [],
+      "fire_range": 6000.0,
+      "fire_cone_width": 40.0,
+      "fire_cone_height": 40.0,
+      "turret_rotate_speed": 0.35,
+      "default_projectile": "AGD_Proj_Ship_Dual_Heavy_Turbolaser_Generic",
+      "theatre": "Space"
+    },
+    {
+      "category": "Dual Turbolaser (Republic)",
+      "accuracy_by_category": {
+        "All": 30.0,
+        "Fighter": 100.0,
+        "Bomber": 100.0,
+        "Transport": 45.0,
+        "Corvette": 45.0,
+        "Frigate": 36.0
+      },
+      "fire_min_recharge": 4.5,
+      "fire_max_recharge": 8.0,
+      "fire_pulse_count": 2,
+      "fire_pulse_delay": 0.6,
+      "sfx_event": "Generic_RepTurbolaser",
+      "modifiers": {
+        "allow_opportunity_fire_when_targeting": "False",
+        "allow_opportunity_fire_when_idle": "True",
+        "fire_when_in_power_to_weapons_mode": "Yes",
+        "power_to_weapons_mode_weapon_delay_multiplier": "0.25"
+      },
+      "category_restrictions": [],
+      "fire_range": 6500.0,
+      "fire_cone_width": 150.0,
+      "fire_cone_height": 150.0,
+      "turret_rotate_speed": 0.0,
+      "default_projectile": "AGD_Proj_Ship_Med_Dual_Turbolaser_Blue",
+      "theatre": "Space"
     }
   ]
 }

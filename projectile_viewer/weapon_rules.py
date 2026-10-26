@@ -24,12 +24,23 @@ RULE_FIELDS = (
     "sfx_event",
     "modifiers",
     "category_restrictions",
+    "fire_range",
+    "fire_cone_width",
+    "fire_cone_height",
+    "turret_rotate_speed",
+    "projectile",
 )
+
+# RULE_FIELDS whose 0.0 / "" default means "this template doesn't define it"
+# - apply_rule leaves the config's own (seeded) value alone for these instead
+# of zeroing/blanking it, so templates saved before these fields existed
+# keep behaving exactly as they did.
+_UNSET_MEANS_SKIP = ("fire_range", "fire_cone_width", "fire_cone_height", "turret_rotate_speed")
 
 DEFAULT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "user_data", "weapon_rules.json"
 )
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -43,6 +54,17 @@ class WeaponRule:
     sfx_event: str = ""
     modifiers: dict[str, str] = field(default_factory=dict)
     category_restrictions: list[str] = field(default_factory=list)
+    fire_range: float = 0.0
+    fire_cone_width: float = 0.0
+    fire_cone_height: float = 0.0
+    turret_rotate_speed: float = 0.0
+    # The projectile weapons built from this template fire by default; applied
+    # to a config's source_projectile_name (callers re-seed damage after).
+    default_projectile: str = ""
+    # "Space", "Land" or "" (applies to either). Organisational only - it
+    # filters the template list and the category choices in the editor, and
+    # is deliberately not in RULE_FIELDS (never copied onto a config).
+    theatre: str = ""
 
 
 def apply_rule(config: WeaponConfig, rule: WeaponRule) -> None:
@@ -64,8 +86,39 @@ def apply_rule(config: WeaponConfig, rule: WeaponRule) -> None:
             config.modifiers = dict(rule.modifiers)
         elif name == "category_restrictions":
             config.category_restrictions = list(rule.category_restrictions)
+        elif name == "projectile":
+            if rule.default_projectile:
+                config.source_projectile_name = rule.default_projectile
+        elif name in _UNSET_MEANS_SKIP:
+            value = getattr(rule, name)
+            if value:
+                setattr(config, name, value)
         else:
             setattr(config, name, getattr(rule, name))
+
+
+def rule_from_config(config: WeaponConfig, category: str, theatre: str = "", include_projectile: bool = False) -> WeaponRule:
+    """Captures a WeaponConfig's rule-governed fields into a new template
+    (the reverse of apply_rule). `include_projectile` also stores the
+    config's source projectile as the template's default projectile -
+    applying such a template to other weapons swaps their projectile."""
+    return WeaponRule(
+        category=category,
+        accuracy_by_category=dict(config.accuracy_by_category),
+        fire_min_recharge=config.fire_min_recharge,
+        fire_max_recharge=config.fire_max_recharge,
+        fire_pulse_count=config.fire_pulse_count,
+        fire_pulse_delay=config.fire_pulse_delay,
+        sfx_event=config.sfx_event,
+        modifiers=dict(config.modifiers),
+        category_restrictions=list(config.category_restrictions),
+        fire_range=config.fire_range,
+        fire_cone_width=config.fire_cone_width,
+        fire_cone_height=config.fire_cone_height,
+        turret_rotate_speed=config.turret_rotate_speed,
+        default_projectile=config.source_projectile_name if include_projectile else "",
+        theatre=theatre,
+    )
 
 
 def _rule_to_dict(rule: WeaponRule) -> dict:
@@ -79,6 +132,12 @@ def _rule_to_dict(rule: WeaponRule) -> dict:
         "sfx_event": rule.sfx_event,
         "modifiers": dict(rule.modifiers),
         "category_restrictions": list(rule.category_restrictions),
+        "fire_range": rule.fire_range,
+        "fire_cone_width": rule.fire_cone_width,
+        "fire_cone_height": rule.fire_cone_height,
+        "turret_rotate_speed": rule.turret_rotate_speed,
+        "default_projectile": rule.default_projectile,
+        "theatre": rule.theatre,
     }
 
 
@@ -93,6 +152,12 @@ def _dict_to_rule(data: dict) -> WeaponRule:
         sfx_event=data.get("sfx_event", ""),
         modifiers=dict(data.get("modifiers", {})),
         category_restrictions=list(data.get("category_restrictions", [])),
+        fire_range=data.get("fire_range", 0.0),
+        fire_cone_width=data.get("fire_cone_width", 0.0),
+        fire_cone_height=data.get("fire_cone_height", 0.0),
+        turret_rotate_speed=data.get("turret_rotate_speed", 0.0),
+        default_projectile=data.get("default_projectile", ""),
+        theatre=data.get("theatre", ""),
     )
 
 
